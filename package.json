@@ -1,0 +1,29 @@
+{
+  "name": "realtime-collaborative-whiteboard",
+  "version": "1.0.0",
+  "description": "实时协作白板工具 - 支持多用户同时绘制、图层管理和历史回放",
+  "private": true,
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=server\" \"npm run dev --workspace=client\"",
+    "build": "npm run build --workspace=client",
+    "start": "npm run start --workspace=server",
+    "install:all": "npm install --workspace=server && npm install --workspace=client"
+  },
+  "keywords": [
+    "whiteboard",
+    "collaborative",
+    "realtime",
+    "socket.io",
+    "react",
+    "canvas"
+  ],
+  "author": "Collaborative Whiteboard Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
