@@ -152,15 +152,21 @@ const setupSocketHandlers = (io) => {
         const elementIndex = roomState.elements.findIndex((e) => e.id === elementId);
 
         if (elementIndex !== -1) {
-          const oldElement = { ...roomState.elements[elementIndex] };
-          roomState.elements[elementIndex] = { ...oldElement, ...updates };
+          // 使用深拷贝避免浅拷贝导致的 oldData 与新数据共享引用（如 freehand 的 points_data）
+          const oldElement = deepCloneElement(roomState.elements[elementIndex]);
+          const newElement = { ...oldElement, ...updates };
+          // 对 updates 中可能包含的数组/对象字段也进行深拷贝
+          if (updates.points_data && Array.isArray(updates.points_data)) {
+            newElement.points_data = updates.points_data.map((p) => ({ ...p }));
+          }
+          roomState.elements[elementIndex] = newElement;
 
           // 保存历史记录
           roomState.history.push({
             type: 'update',
             elementId,
             oldData: oldElement,
-            newData: roomState.elements[elementIndex],
+            newData: deepCloneElement(newElement),
             timestamp: new Date(),
           });
 
@@ -219,135 +225,411 @@ const setupSocketHandlers = (io) => {
     });
 
     // ============================================================
+    // 事件: resize_start - 尺寸调整开始
+    // 数据: { roomId, elementId, handle, bounds }
+    // ============================================================
+    socket.on('resize_start', (data) => {
+      const { roomId, elementId, handle, bounds } = data;
+      socket.to(roomId).emit('resize_start', {
+        elementId,
+        handle,
+        bounds,
+        userId: socket.id,
+      });
+    });
+
+    // ============================================================
+    // 事件: resize - 尺寸调整进行中（广播预览）
+    // 数据: { roomId, elementId, handle, bounds, updates }
+    // ============================================================
+    socket.on('resize', (data) => {
+      const { roomId, elementId, handle, bounds, updates } = data;
+      socket.to(roomId).emit('resize', {
+        elementId,
+        handle,
+        bounds,
+        updates,
+        userId: socket.id,
+      });
+    });
+
+    // ============================================================
+    // 事件: resize_end - 尺寸调整结束（持久化最终尺寸）
+    // 数据: { roomId, elementId, updates }
+    // ============================================================
+    socket.on('resize_end', async (data) => {
+      try {
+        const { roomId, elementId, updates } = data;
+
+        // 若没有实际更新（拖拽但未调整尺寸），只广播结束预览，不写入数据库/历史
+        if (!updates || Object.keys(updates).length === 0) {
+          socket.to(roomId).emit('resize_end', {
+            elementId,
+            userId: socket.id,
+          });
+          return;
+        }
+
+        // 更新数据库
+        await roomManager.updateElement(elementId, updates);
+
+        // 更新内存中的元素并记录历史
+        const roomState = roomManager.getRoomState(roomId);
+        const elementIndex = roomState.elements.findIndex((e) => e.id === elementId);
+
+        if (elementIndex !== -1) {
+          const oldElement = deepCloneElement(roomState.elements[elementIndex]);
+          const newElement = { ...oldElement, ...updates };
+          if (updates.points_data && Array.isArray(updates.points_data)) {
+            newElement.points_data = updates.points_data.map((p) => ({ ...p }));
+          }
+          roomState.elements[elementIndex] = newElement;
+
+          // 保存历史记录（支持撤销重做）
+          roomState.history.push({
+            type: 'update',
+            elementId,
+            oldData: oldElement,
+            newData: deepCloneElement(newElement),
+            timestamp: new Date(),
+          });
+
+          roomState.redoStack = [];
+        }
+
+        // 通知房间内所有用户最终尺寸
+        io.to(roomId).emit('element_updated', {
+          elementId,
+          updates,
+          userId: socket.id,
+        });
+
+        // 通知远端结束预览
+        socket.to(roomId).emit('resize_end', {
+          elementId,
+          userId: socket.id,
+        });
+      } catch (err) {
+        console.error('尺寸调整失败:', err);
+        // 无论如何广播结束预览，避免协作端残留预览图形
+        if (data && data.roomId && data.elementId) {
+          socket.to(data.roomId).emit('resize_end', {
+            elementId: data.elementId,
+            userId: socket.id,
+          });
+        }
+        socket.emit('error', { message: '尺寸调整失败' });
+      }
+    });
+
+    // ============================================================
+    // 事件: move_start - 元素拖拽开始
+    // 数据: { roomId, elementId, bounds }
+    // ============================================================
+    socket.on('move_start', (data) => {
+      const { roomId, elementId, bounds } = data;
+      socket.to(roomId).emit('move_start', {
+        elementId,
+        bounds,
+        userId: socket.id,
+      });
+    });
+
+    // ============================================================
+    // 事件: move - 元素拖拽进行中（广播预览）
+    // 数据: { roomId, elementId, delta, updates }
+    // ============================================================
+    socket.on('move', (data) => {
+      const { roomId, elementId, delta, updates } = data;
+      socket.to(roomId).emit('move', {
+        elementId,
+        delta,
+        updates,
+        userId: socket.id,
+      });
+    });
+
+    // ============================================================
+    // 事件: move_end - 元素拖拽结束（持久化最终位置）
+    // 数据: { roomId, elementId, updates }
+    // ============================================================
+    socket.on('move_end', async (data) => {
+      try {
+        const { roomId, elementId, updates } = data;
+
+        // 若没有实际更新（拖拽但未移动），只广播结束预览，不写入数据库/历史
+        if (!updates || Object.keys(updates).length === 0) {
+          socket.to(roomId).emit('move_end', {
+            elementId,
+            userId: socket.id,
+          });
+          return;
+        }
+
+        // 更新数据库
+        await roomManager.updateElement(elementId, updates);
+
+        // 更新内存中的元素并记录历史
+        const roomState = roomManager.getRoomState(roomId);
+        const elementIndex = roomState.elements.findIndex((e) => e.id === elementId);
+
+        if (elementIndex !== -1) {
+          const oldElement = deepCloneElement(roomState.elements[elementIndex]);
+          const newElement = { ...oldElement, ...updates };
+          if (updates.points_data && Array.isArray(updates.points_data)) {
+            newElement.points_data = updates.points_data.map((p) => ({ ...p }));
+          }
+          roomState.elements[elementIndex] = newElement;
+
+          // 保存历史记录（支持撤销重做）
+          roomState.history.push({
+            type: 'update',
+            elementId,
+            oldData: oldElement,
+            newData: deepCloneElement(newElement),
+            timestamp: new Date(),
+          });
+
+          roomState.redoStack = [];
+        }
+
+        // 通知房间内所有用户最终位置
+        io.to(roomId).emit('element_updated', {
+          elementId,
+          updates,
+          userId: socket.id,
+        });
+
+        // 通知远端结束预览
+        socket.to(roomId).emit('move_end', {
+          elementId,
+          userId: socket.id,
+        });
+      } catch (err) {
+        console.error('元素移动失败:', err);
+        // 无论如何广播结束预览，避免协作端残留预览图形
+        if (data && data.roomId && data.elementId) {
+          socket.to(data.roomId).emit('move_end', {
+            elementId: data.elementId,
+            userId: socket.id,
+          });
+        }
+        socket.emit('error', { message: '元素移动失败' });
+      }
+    });
+
+    // ============================================================
     // 事件: update_z_index - 更新图层顺序
     // 数据: { roomId, elementId, newZIndex }
     // ============================================================
     socket.on('update_z_index', async (data) => {
-      const { roomId, elementId, newZIndex } = data;
+      try {
+        const { roomId, elementId, newZIndex } = data;
+        const updates = { zIndex: newZIndex };
 
-      // 通知房间内所有用户更新图层
-      io.to(roomId).emit('z_index_updated', {
-        elementId,
-        newZIndex,
-        userId: socket.id,
-      });
+        // 更新数据库
+        await roomManager.updateElement(elementId, updates);
+
+        // 更新内存中的元素并记录历史
+        const roomState = roomManager.getRoomState(roomId);
+        const elementIndex = roomState.elements.findIndex((e) => e.id === elementId);
+
+        if (elementIndex !== -1) {
+          const oldElement = deepCloneElement(roomState.elements[elementIndex]);
+          const newElement = { ...oldElement, ...updates };
+          roomState.elements[elementIndex] = newElement;
+
+          // 保存历史记录（支持撤销重做）
+          roomState.history.push({
+            type: 'update',
+            elementId,
+            oldData: oldElement,
+            newData: deepCloneElement(newElement),
+            timestamp: new Date(),
+          });
+
+          roomState.redoStack = [];
+        }
+
+        // 通知房间内所有用户更新图层
+        io.to(roomId).emit('z_index_updated', {
+          elementId,
+          newZIndex,
+          userId: socket.id,
+        });
+      } catch (err) {
+        console.error('更新图层顺序失败:', err);
+        socket.emit('error', { message: '更新图层顺序失败' });
+      }
     });
 
     // ============================================================
     // 事件: toggle_visibility - 切换元素可见性
     // 数据: { roomId, elementId, isVisible }
     // ============================================================
-    socket.on('toggle_visibility', (data) => {
-      const { roomId, elementId, isVisible } = data;
+    socket.on('toggle_visibility', async (data) => {
+      try {
+        const { roomId, elementId, isVisible } = data;
+        const updates = { isVisible };
 
-      // 通知房间内所有用户
-      io.to(roomId).emit('visibility_changed', {
-        elementId,
-        isVisible,
-        userId: socket.id,
-      });
+        // 更新数据库
+        await roomManager.updateElement(elementId, updates);
+
+        // 更新内存中的元素并记录历史
+        const roomState = roomManager.getRoomState(roomId);
+        const elementIndex = roomState.elements.findIndex((e) => e.id === elementId);
+
+        if (elementIndex !== -1) {
+          const oldElement = deepCloneElement(roomState.elements[elementIndex]);
+          const newElement = { ...oldElement, ...updates };
+          roomState.elements[elementIndex] = newElement;
+
+          // 保存历史记录（支持撤销重做）
+          roomState.history.push({
+            type: 'update',
+            elementId,
+            oldData: oldElement,
+            newData: deepCloneElement(newElement),
+            timestamp: new Date(),
+          });
+
+          roomState.redoStack = [];
+        }
+
+        // 通知房间内所有用户
+        io.to(roomId).emit('visibility_changed', {
+          elementId,
+          isVisible,
+          userId: socket.id,
+        });
+      } catch (err) {
+        console.error('切换可见性失败:', err);
+        socket.emit('error', { message: '切换可见性失败' });
+      }
     });
 
     // ============================================================
     // 事件: undo - 撤销操作
     // 数据: { roomId }
     // ============================================================
-    socket.on('undo', (data) => {
-      const { roomId } = data;
-      const roomState = roomManager.getRoomState(roomId);
+    socket.on('undo', async (data) => {
+      try {
+        const { roomId } = data;
+        const roomState = roomManager.getRoomState(roomId);
 
-      if (roomState.history.length === 0) {
-        socket.emit('undo_complete', { success: false, message: '没有可撤销的操作' });
-        return;
+        if (roomState.history.length === 0) {
+          socket.emit('undo_complete', { success: false, message: '没有可撤销的操作' });
+          return;
+        }
+
+        const lastAction = roomState.history.pop();
+
+        switch (lastAction.type) {
+          case 'create':
+            // 撤销创建: 从数据库物理删除元素
+            await roomManager.hardDeleteElement(lastAction.element.id);
+            roomState.elements = roomState.elements.filter(
+              (e) => e.id !== lastAction.element.id
+            );
+            io.to(roomId).emit('undo_element_deleted', { elementId: lastAction.element.id });
+            break;
+
+          case 'delete':
+            // 撤销删除: 恢复数据库中的元素
+            await roomManager.restoreElement(lastAction.element.id);
+            roomState.elements.push(lastAction.element);
+            io.to(roomId).emit('undo_element_restored', { element: lastAction.element });
+            break;
+
+          case 'update':
+            // 撤销更新: 恢复旧数据到数据库（仅白名单字段，避免 id/user/元数据回写错误）
+            const oldDbData = pickElementFields(lastAction.oldData);
+            if (oldDbData && Object.keys(oldDbData).length > 0) {
+              await roomManager.updateElement(lastAction.elementId, oldDbData);
+            }
+            const idx = roomState.elements.findIndex(
+              (e) => e.id === lastAction.elementId
+            );
+            if (idx !== -1) {
+              roomState.elements[idx] = deepCloneElement(lastAction.oldData);
+              io.to(roomId).emit('undo_element_updated', {
+                elementId: lastAction.elementId,
+                oldData: lastAction.oldData,
+              });
+            }
+            break;
+        }
+
+        // 将撤销的操作放入重做栈
+        roomState.redoStack.push(lastAction);
+
+        socket.emit('undo_complete', { success: true });
+      } catch (err) {
+        console.error('撤销操作失败:', err);
+        socket.emit('error', { message: '撤销操作失败' });
       }
-
-      const lastAction = roomState.history.pop();
-
-      switch (lastAction.type) {
-        case 'create':
-          // 撤销创建: 删除元素
-          roomState.elements = roomState.elements.filter(
-            (e) => e.id !== lastAction.element.id
-          );
-          io.to(roomId).emit('undo_element_deleted', { elementId: lastAction.element.id });
-          break;
-
-        case 'delete':
-          // 撤销删除: 恢复元素
-          roomState.elements.push(lastAction.element);
-          io.to(roomId).emit('undo_element_restored', { element: lastAction.element });
-          break;
-
-        case 'update':
-          // 撤销更新: 恢复旧数据
-          const idx = roomState.elements.findIndex(
-            (e) => e.id === lastAction.elementId
-          );
-          if (idx !== -1) {
-            roomState.elements[idx] = lastAction.oldData;
-            io.to(roomId).emit('undo_element_updated', {
-              elementId: lastAction.elementId,
-              oldData: lastAction.oldData,
-            });
-          }
-          break;
-      }
-
-      // 将撤销的操作放入重做栈
-      roomState.redoStack.push(lastAction);
-
-      socket.emit('undo_complete', { success: true });
     });
 
     // ============================================================
     // 事件: redo - 重做操作
     // 数据: { roomId }
     // ============================================================
-    socket.on('redo', (data) => {
-      const { roomId } = data;
-      const roomState = roomManager.getRoomState(roomId);
+    socket.on('redo', async (data) => {
+      try {
+        const { roomId } = data;
+        const roomState = roomManager.getRoomState(roomId);
 
-      if (roomState.redoStack.length === 0) {
-        socket.emit('redo_complete', { success: false, message: '没有可重做的操作' });
-        return;
+        if (roomState.redoStack.length === 0) {
+          socket.emit('redo_complete', { success: false, message: '没有可重做的操作' });
+          return;
+        }
+
+        const lastUndo = roomState.redoStack.pop();
+
+        switch (lastUndo.type) {
+          case 'create':
+            // 重做创建: 重新插入元素到数据库
+            await roomManager.reinsertElement(lastUndo.element);
+            roomState.elements.push(lastUndo.element);
+            io.to(roomId).emit('undo_element_restored', { element: lastUndo.element });
+            break;
+
+          case 'delete':
+            // 重做删除: 软删除元素
+            await roomManager.deleteElement(lastUndo.element.id);
+            roomState.elements = roomState.elements.filter(
+              (e) => e.id !== lastUndo.element.id
+            );
+            io.to(roomId).emit('undo_element_deleted', { elementId: lastUndo.element.id });
+            break;
+
+          case 'update':
+            // 重做更新: 应用新数据到数据库（仅白名单字段）
+            const newDbData = pickElementFields(lastUndo.newData);
+            if (newDbData && Object.keys(newDbData).length > 0) {
+              await roomManager.updateElement(lastUndo.elementId, newDbData);
+            }
+            const idx = roomState.elements.findIndex(
+              (e) => e.id === lastUndo.elementId
+            );
+            if (idx !== -1) {
+              roomState.elements[idx] = deepCloneElement(lastUndo.newData);
+              io.to(roomId).emit('undo_element_updated', {
+                elementId: lastUndo.elementId,
+                oldData: lastUndo.newData,
+              });
+            }
+            break;
+        }
+
+        // 将重做的操作放回历史栈
+        roomState.history.push(lastUndo);
+
+        socket.emit('redo_complete', { success: true });
+      } catch (err) {
+        console.error('重做操作失败:', err);
+        socket.emit('error', { message: '重做操作失败' });
       }
-
-      const lastUndo = roomState.redoStack.pop();
-
-      switch (lastUndo.type) {
-        case 'create':
-          // 重做创建: 恢复元素
-          roomState.elements.push(lastUndo.element);
-          io.to(roomId).emit('undo_element_restored', { element: lastUndo.element });
-          break;
-
-        case 'delete':
-          // 重做删除: 删除元素
-          roomState.elements = roomState.elements.filter(
-            (e) => e.id !== lastUndo.element.id
-          );
-          io.to(roomId).emit('undo_element_deleted', { elementId: lastUndo.element.id });
-          break;
-
-        case 'update':
-          // 重做更新: 应用新数据
-          const idx = roomState.elements.findIndex(
-            (e) => e.id === lastUndo.elementId
-          );
-          if (idx !== -1) {
-            roomState.elements[idx] = lastUndo.newData;
-            io.to(roomId).emit('undo_element_updated', {
-              elementId: lastUndo.elementId,
-              oldData: lastUndo.newData,
-            });
-          }
-          break;
-      }
-
-      // 将重做的操作放回历史栈
-      roomState.history.push(lastUndo);
-
-      socket.emit('redo_complete', { success: true });
     });
 
     // ============================================================
@@ -526,6 +808,46 @@ const getRandomColor = () => {
     '#00BCD4', '#E91E63', '#795548', '#607D8B', '#3F51B5',
   ];
   return colors[Math.floor(Math.random() * colors.length)];
+};
+
+/**
+ * 深拷贝一个元素对象，避免 points_data 等数组/对象字段共享引用
+ * @param {object} element
+ * @returns {object}
+ */
+const deepCloneElement = (element) => {
+  if (!element) return element;
+  const cloned = { ...element };
+  if (Array.isArray(cloned.points_data)) {
+    cloned.points_data = cloned.points_data.map((p) => ({ ...p }));
+  }
+  return cloned;
+};
+
+/**
+ * 从完整元素对象中提取可写入 whiteboard_elements 表的白名单字段
+ * 避免把 id / room_id / user_id / 元数据字段写回 UPDATE 导致异常
+ * @param {object} data
+ * @returns {object}
+ */
+const ELEMENT_DB_FIELDS = [
+  'element_type',
+  'stroke_color', 'stroke_width', 'fill_color', 'opacity',
+  'is_visible', 'z_index', 'is_locked',
+  'points_data',
+  'start_x', 'start_y', 'width', 'height',
+  'end_x', 'end_y',
+  'text_content', 'font_family', 'font_size',
+];
+const pickElementFields = (data) => {
+  if (!data) return {};
+  const out = {};
+  for (const key of ELEMENT_DB_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(data, key) && data[key] !== undefined) {
+      out[key] = data[key];
+    }
+  }
+  return out;
 };
 
 module.exports = { setupSocketHandlers };

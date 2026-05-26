@@ -24,6 +24,12 @@ import {
   sendGetSnapshots,
   sendLoadSnapshot,
   sendCursorPosition,
+  sendResizeStart,
+  sendResize,
+  sendResizeEnd,
+  sendMoveStart,
+  sendMove,
+  sendMoveEnd,
 } from '../services/socket';
 
 import Toolbar from '../components/Toolbar';
@@ -62,6 +68,8 @@ function WhiteboardPage({ room, user, onLeave }) {
   const [currentElement, setCurrentElement] = useState(null);
   const [selectedElementId, setSelectedElementId] = useState(null);
   const [remoteElements, setRemoteElements] = useState({}); // 存储远程用户正在绘制的临时元素
+  const [remoteResizingMap, setRemoteResizingMap] = useState({}); // 存储远程用户正在调整尺寸的元素预览
+  const [remoteMovingMap, setRemoteMovingMap] = useState({}); // 存储远程用户正在移动的元素预览
 
   // 房间状态
   const [users, setUsers] = useState([]);
@@ -78,6 +86,8 @@ function WhiteboardPage({ room, user, onLeave }) {
   // 引用
   const canvasRef = useRef(null);
   const hasJoinedRef = useRef(false);
+  const localResizingRef = useRef(null);
+  const localMovingRef = useRef(null);
 
   // 初始化邀请链接
   useEffect(() => {
@@ -132,6 +142,16 @@ function WhiteboardPage({ room, user, onLeave }) {
     onSocketEvent('draw_start', handleRemoteDrawStart);
     onSocketEvent('draw', handleRemoteDraw);
 
+    // 尺寸调整事件
+    onSocketEvent('resize_start', handleRemoteResizeStart);
+    onSocketEvent('resize', handleRemoteResize);
+    onSocketEvent('resize_end', handleRemoteResizeEnd);
+
+    // 元素移动事件
+    onSocketEvent('move_start', handleRemoteMoveStart);
+    onSocketEvent('move', handleRemoteMove);
+    onSocketEvent('move_end', handleRemoteMoveEnd);
+
     // 撤销重做事件
     onSocketEvent('undo_element_deleted', handleUndoDelete);
     onSocketEvent('undo_element_restored', handleUndoRestore);
@@ -158,6 +178,12 @@ function WhiteboardPage({ room, user, onLeave }) {
     offSocketEvent('visibility_changed', handleVisibilityChanged);
     offSocketEvent('draw_start', handleRemoteDrawStart);
     offSocketEvent('draw', handleRemoteDraw);
+    offSocketEvent('resize_start', handleRemoteResizeStart);
+    offSocketEvent('resize', handleRemoteResize);
+    offSocketEvent('resize_end', handleRemoteResizeEnd);
+    offSocketEvent('move_start', handleRemoteMoveStart);
+    offSocketEvent('move', handleRemoteMove);
+    offSocketEvent('move_end', handleRemoteMoveEnd);
     offSocketEvent('undo_element_deleted', handleUndoDelete);
     offSocketEvent('undo_element_restored', handleUndoRestore);
     offSocketEvent('undo_element_updated', handleUndoUpdate);
@@ -183,6 +209,13 @@ function WhiteboardPage({ room, user, onLeave }) {
   };
 
   const handleElementUpdated = (data) => {
+    if (
+      (localResizingRef.current && localResizingRef.current === data.elementId) ||
+      (localMovingRef.current && localMovingRef.current === data.elementId)
+    ) {
+      // 本地尺寸调整或移动中，已实时更新，跳过避免重复
+      return;
+    }
     setElements((prev) =>
       prev.map((el) =>
         el.id === data.elementId ? { ...el, ...data.updates } : el
@@ -258,6 +291,68 @@ function WhiteboardPage({ room, user, onLeave }) {
         ...prev,
         [data.userId]: updated,
       };
+    });
+  };
+
+  // ============================================================
+  // 远程尺寸调整事件处理
+  // ============================================================
+
+  const handleRemoteResizeStart = (data) => {
+    const previewData = {
+      ...(data.bounds || {}),
+      ...(data.updates || {}),
+      _opacity: 0.6,
+    };
+    setRemoteResizingMap((prev) => ({
+      ...prev,
+      [data.elementId]: previewData,
+    }));
+  };
+
+  const handleRemoteResize = (data) => {
+    const previewData = {
+      ...(data.bounds || {}),
+      ...(data.updates || {}),
+      _opacity: 0.6,
+    };
+    setRemoteResizingMap((prev) => ({
+      ...prev,
+      [data.elementId]: previewData,
+    }));
+  };
+
+  const handleRemoteResizeEnd = (data) => {
+    setRemoteResizingMap((prev) => {
+      const next = { ...prev };
+      delete next[data.elementId];
+      return next;
+    });
+  };
+
+  // ============================================================
+  // 远程元素移动事件处理
+  // ============================================================
+
+  const handleRemoteMoveStart = (data) => {
+    setRemoteMovingMap((prev) => ({
+      ...prev,
+      [data.elementId]: { ...(data.updates || {}), ...(data.bounds || {}) },
+    }));
+  };
+
+  const handleRemoteMove = (data) => {
+    setRemoteMovingMap((prev) => ({
+      ...prev,
+      [data.elementId]: { ...(data.updates || {}), ...(data.bounds || {}) },
+    }));
+  };
+
+  const handleRemoteMoveEnd = (data) => {
+    setRemoteMovingMap((prev) => {
+      const next = { ...prev };
+      delete next[data.elementId];
+      return next;
     });
   };
 
@@ -469,6 +564,77 @@ function WhiteboardPage({ room, user, onLeave }) {
     setSelectedElementId(elementId);
   };
 
+  // ============================================================
+  // 尺寸调整处理
+  // ============================================================
+
+  /**
+   * 本地尺寸调整开始 - 发送 resize_start 通知其他用户
+   */
+  const handleResizeStart = ({ elementId, handle, bounds }) => {
+    localResizingRef.current = elementId;
+    sendResizeStart({ roomId: room.id, elementId, handle, bounds });
+  };
+
+  /**
+   * 本地尺寸调整进行中 - 实时更新本地元素并广播预览
+   */
+  const handleResizeUpdate = ({ elementId, handle, bounds, updates }) => {
+    // 本地直接更新，实时响应
+    setElements((prev) =>
+      prev.map((el) => (el.id === elementId ? { ...el, ...updates } : el))
+    );
+    sendResize({ roomId: room.id, elementId, handle, bounds, updates });
+  };
+
+  /**
+   * 本地尺寸调整结束 - 持久化并广播最终尺寸
+   */
+  const handleResizeEnd = ({ elementId, updates }) => {
+    // 没有实际变化时跳过
+    if (!updates || Object.keys(updates).length === 0) {
+      localResizingRef.current = null;
+      return;
+    }
+    sendResizeEnd({ roomId: room.id, elementId, updates });
+    localResizingRef.current = null;
+  };
+
+  // ============================================================
+  // 元素移动处理
+  // ============================================================
+
+  /**
+   * 本地移动开始 - 发送 move_start 通知其他用户
+   */
+  const handleMoveStart = ({ elementId, bounds }) => {
+    localMovingRef.current = elementId;
+    sendMoveStart({ roomId: room.id, elementId, bounds });
+  };
+
+  /**
+   * 本地移动进行中 - 实时更新本地元素并广播预览
+   */
+  const handleMoveUpdate = ({ elementId, delta, updates }) => {
+    setElements((prev) =>
+      prev.map((el) => (el.id === elementId ? { ...el, ...updates } : el))
+    );
+    sendMove({ roomId: room.id, elementId, delta, updates });
+  };
+
+  /**
+   * 本地移动结束 - 持久化并广播最终位置
+   */
+  const handleMoveEnd = ({ elementId, updates }) => {
+    // 没有实际变化时跳过（例如点击后未移动）
+    if (!updates || Object.keys(updates).length === 0) {
+      localMovingRef.current = null;
+      return;
+    }
+    sendMoveEnd({ roomId: room.id, elementId, updates });
+    localMovingRef.current = null;
+  };
+
   /**
    * 处理删除选中元素
    */
@@ -673,6 +839,8 @@ function WhiteboardPage({ room, user, onLeave }) {
           elements={elements}
           currentElement={currentElement}
           remoteElements={Object.values(remoteElements)}
+          remoteResizingMap={remoteResizingMap}
+          remoteMovingMap={remoteMovingMap}
           cursors={cursors}
           currentTool={currentTool}
           selectedElementId={selectedElementId}
@@ -680,6 +848,12 @@ function WhiteboardPage({ room, user, onLeave }) {
           onMouseDown={handleMouseDown}
           onMouseMove={handleMouseMove}
           onMouseUp={handleMouseUp}
+          onResizeStart={handleResizeStart}
+          onResizeUpdate={handleResizeUpdate}
+          onResizeEnd={handleResizeEnd}
+          onMoveStart={handleMoveStart}
+          onMoveUpdate={handleMoveUpdate}
+          onMoveEnd={handleMoveEnd}
         />
 
         {showUsers && (

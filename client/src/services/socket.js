@@ -185,6 +185,54 @@ export const sendLoadSnapshot = (data) => {
 };
 
 /**
+ * 发送尺寸调整开始事件
+ * @param {object} data - { roomId, elementId, handle, bounds }
+ */
+export const sendResizeStart = (data) => {
+  getSocket().emit('resize_start', data);
+};
+
+/**
+ * 发送尺寸调整进行中事件
+ * @param {object} data - { roomId, elementId, handle, bounds }
+ */
+export const sendResize = (data) => {
+  getSocket().emit('resize', data);
+};
+
+/**
+ * 发送尺寸调整结束事件（持久化）
+ * @param {object} data - { roomId, elementId, updates }
+ */
+export const sendResizeEnd = (data) => {
+  getSocket().emit('resize_end', data);
+};
+
+/**
+ * 发送拖拽开始事件
+ * @param {object} data - { roomId, elementId, bounds }
+ */
+export const sendMoveStart = (data) => {
+  getSocket().emit('move_start', data);
+};
+
+/**
+ * 发送拖拽进行中事件（广播预览）
+ * @param {object} data - { roomId, elementId, delta, updates }
+ */
+export const sendMove = (data) => {
+  getSocket().emit('move', data);
+};
+
+/**
+ * 发送拖拽结束事件（持久化）
+ * @param {object} data - { roomId, elementId, updates }
+ */
+export const sendMoveEnd = (data) => {
+  getSocket().emit('move_end', data);
+};
+
+/**
  * 发送光标位置
  * @param {object} data - 光标数据
  */

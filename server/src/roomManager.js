@@ -228,6 +228,87 @@ const deleteElement = async (elementId) => {
 };
 
 /**
+ * 恢复被软删除的元素
+ * @param {string} elementId - 元素ID
+ * @returns {Promise<void>}
+ */
+const restoreElement = async (elementId) => {
+  try {
+    await query(
+      `UPDATE whiteboard_elements SET is_deleted = FALSE, deleted_at = NULL WHERE id = $1`,
+      [elementId]
+    );
+  } catch (err) {
+    console.error('恢复元素失败:', err);
+    throw err;
+  }
+};
+
+/**
+ * 物理删除元素（用于撤销创建操作）
+ * @param {string} elementId - 元素ID
+ * @returns {Promise<void>}
+ */
+const hardDeleteElement = async (elementId) => {
+  try {
+    await query(
+      `DELETE FROM whiteboard_elements WHERE id = $1`,
+      [elementId]
+    );
+  } catch (err) {
+    console.error('物理删除元素失败:', err);
+    throw err;
+  }
+};
+
+/**
+ * 重新插入元素（用于重做创建操作，保持原ID）
+ * @param {object} element - 元素数据
+ * @returns {Promise<void>}
+ */
+const reinsertElement = async (element) => {
+  const dbElement = {
+    id: element.id,
+    room_id: element.roomId || element.room_id,
+    user_id: element.userId || element.user_id,
+    element_type: element.elementType || element.element_type,
+    stroke_color: element.strokeColor || element.stroke_color || '#000000',
+    stroke_width: element.strokeWidth || element.stroke_width || 2,
+    fill_color: element.fillColor || element.fill_color,
+    opacity: element.opacity || 1,
+    points_data: element.pointsData || element.points_data,
+    start_x: element.startX !== undefined ? element.startX : element.start_x,
+    start_y: element.startY !== undefined ? element.startY : element.start_y,
+    width: element.width,
+    height: element.height,
+    end_x: element.endX !== undefined ? element.endX : element.end_x,
+    end_y: element.endY !== undefined ? element.endY : element.end_y,
+    text_content: element.textContent || element.text_content,
+    font_family: element.fontFamily || element.font_family,
+    z_index: element.zIndex || element.z_index,
+  };
+
+  try {
+    await query(
+      `INSERT INTO whiteboard_elements 
+       (id, room_id, user_id, element_type, stroke_color, stroke_width, fill_color, opacity,
+        points_data, start_x, start_y, width, height, end_x, end_y, text_content, font_family, font_size, z_index)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
+      [
+        dbElement.id, dbElement.room_id, dbElement.user_id, dbElement.element_type,
+        dbElement.stroke_color, dbElement.stroke_width, dbElement.fill_color, dbElement.opacity,
+        dbElement.points_data, dbElement.start_x, dbElement.start_y,
+        dbElement.width, dbElement.height, dbElement.end_x, dbElement.end_y,
+        dbElement.text_content, dbElement.font_family, dbElement.font_size, dbElement.z_index,
+      ]
+    );
+  } catch (err) {
+    console.error('重新插入元素失败:', err);
+    throw err;
+  }
+};
+
+/**
  * 保存操作历史
  * @param {object} historyData - 历史数据
  * @returns {Promise<void>}
@@ -334,6 +415,9 @@ module.exports = {
   saveElement,
   updateElement,
   deleteElement,
+  restoreElement,
+  hardDeleteElement,
+  reinsertElement,
   saveHistory,
   createSnapshot,
   getSnapshots,
